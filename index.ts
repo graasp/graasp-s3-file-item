@@ -72,7 +72,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
   });
 
   // register pre copy handler to make a copy of the s3 file object before the item copy
-  const copyItemTaskName = taskManager.getCreateCopyItemTaskName();
+  const copyItemTaskName = taskManager.getCopyItemTaskName();
   runner.setTaskPreHookHandler(copyItemTaskName, async (item, actor) => {
     const { type: itemType, extra } = item as Item<S3FileExtra>;
     if (itemType !== ITEM_TYPE) return;
