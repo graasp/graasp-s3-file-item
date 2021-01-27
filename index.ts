@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 
-import { TaskManager, Item, UnknownExtra, Member } from 'graasp';
+import { Item, UnknownExtra, ItemCustomTaskManager } from 'graasp';
 
 import {
   upload as uploadSchema,
@@ -16,9 +16,7 @@ interface GraaspS3FileItemOptions {
   s3SecretAccessKey: string,
   s3UseAccelerateEndpoint?: boolean,
   s3Expiration?: number,
-  itemTaskManager: TaskManager<Member, Item>,
-  deleteItemTaskName: string,
-  copyItemTaskName: string
+  itemTaskManager: ItemCustomTaskManager
 }
 
 interface S3FileExtra extends UnknownExtra {
@@ -44,9 +42,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
     s3SecretAccessKey: secretAccessKey,
     s3UseAccelerateEndpoint: useAccelerateEndpoint = false,
     s3Expiration: expiration = 60, // 1 minute,
-    itemTaskManager: taskManager,
-    deleteItemTaskName,
-    copyItemTaskName
+    itemTaskManager: taskManager
   } = options;
   const { taskRunner: runner, log: defaultLogger } = fastify;
 
@@ -63,6 +59,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
   }); // https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html
 
   // register post delete handler to remove the s3 file object after item delete
+  const deleteItemTaskName = taskManager.getDeleteTaskName();
   runner.setTaskPostHookHandler(deleteItemTaskName, (item, actor, log = defaultLogger) => {
     const { type: itemType, extra: { key } } = item as Item<S3FileExtra>;
     if (itemType !== ITEM_TYPE) return;
@@ -75,6 +72,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
   });
 
   // register pre copy handler to make a copy of the s3 file object before the item copy
+  const copyItemTaskName = taskManager.getCreateCopyItemTaskName();
   runner.setTaskPreHookHandler(copyItemTaskName, async (item, actor) => {
     const { type: itemType, extra } = item as Item<S3FileExtra>;
     if (itemType !== ITEM_TYPE) return;
