@@ -60,7 +60,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
 
   // register post delete handler to remove the s3 file object after item delete
   const deleteItemTaskName = taskManager.getDeleteTaskName();
-  runner.setTaskPostHookHandler(deleteItemTaskName, (item, actor, log = defaultLogger) => {
+  runner.setTaskPostHookHandler(deleteItemTaskName, (item, actor, { log = defaultLogger }) => {
     const { type: itemType, extra: { key } } = item as Item<S3FileExtra>;
     if (itemType !== ITEM_TYPE) return;
 
