@@ -1,6 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
-
-import { Item, UnknownExtra, ItemCustomTaskManager } from 'graasp';
+import { Item, UnknownExtra } from 'graasp';
 
 import {
   upload as uploadSchema,
@@ -15,8 +14,7 @@ interface GraaspS3FileItemOptions {
   s3AccessKeyId: string,
   s3SecretAccessKey: string,
   s3UseAccelerateEndpoint?: boolean,
-  s3Expiration?: number,
-  itemTaskManager: ItemCustomTaskManager
+  s3Expiration?: number
 }
 
 interface S3FileExtra extends UnknownExtra {
@@ -41,12 +39,11 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
     s3AccessKeyId: accessKeyId,
     s3SecretAccessKey: secretAccessKey,
     s3UseAccelerateEndpoint: useAccelerateEndpoint = false,
-    s3Expiration: expiration = 60, // 1 minute,
-    itemTaskManager: taskManager
+    s3Expiration: expiration = 60 // 1 minute,
   } = options;
-  const { taskRunner: runner, log: defaultLogger } = fastify;
+  const { items: { taskManager }, taskRunner: runner, log: defaultLogger } = fastify;
 
-  if (!region || !bucket || !accessKeyId || !secretAccessKey || !taskManager) {
+  if (!region || !bucket || !accessKeyId || !secretAccessKey) {
     throw new Error('graasp-s3-file-item: mandatory options missing');
   }
 
@@ -60,8 +57,8 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
 
   // register post delete handler to remove the s3 file object after item delete
   const deleteItemTaskName = taskManager.getDeleteTaskName();
-  runner.setTaskPostHookHandler(deleteItemTaskName, (item, actor, { log = defaultLogger }) => {
-    const { type: itemType, extra: { key } } = item as Item<S3FileExtra>;
+  runner.setTaskPostHookHandler<Item<S3FileExtra>>(deleteItemTaskName, (item, _actor, { log = defaultLogger }) => {
+    const { type: itemType, extra: { key } } = item;
     if (itemType !== ITEM_TYPE) return;
 
     s3.deleteObject({ Bucket: bucket, Key: key }).promise()
@@ -71,20 +68,20 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
       });
   });
 
-  // register pre copy handler to make a copy of the s3 file object before the item copy
-  const copyItemTaskName = taskManager.getCopyItemTaskName();
-  runner.setTaskPreHookHandler(copyItemTaskName, async (item, actor) => {
-    const { type: itemType, extra } = item as Item<S3FileExtra>;
-    if (itemType !== ITEM_TYPE) return;
+  // register pre copy handler to make a copy of the s3 file object before the copy is actually created
+  const copyItemTaskName = taskManager.getCopyTaskName();
+  runner.setTaskPreHookHandler<Item<S3FileExtra>>(copyItemTaskName, async (item, actor) => {
+    const { id, type: itemType, extra } = item; // full copy with new `id`
+    if (!id || itemType !== ITEM_TYPE || !extra) return;
 
     const { key, contenttype, name } = extra;
-    const metadata = {
+    const metadata: S3.Metadata = {
       member: actor.id,
-      item: item.id as string
-    } as S3.Metadata;
+      item: id
+    };
     const newKey = `${randomHexOf4()}/${randomHexOf4()}/${randomHexOf4()}-${Date.now()}`;
 
-    const params = {
+    const params: S3.CopyObjectRequest = {
       CopySource: `${bucket}/${key}`,
       Bucket: bucket,
       Key: newKey,
@@ -93,7 +90,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
       ContentDisposition: `attachment; filename="${name}"`,
       ContentType: contenttype,
       CacheControl: 'no-cache' // TODO: improve?
-    } as S3.CopyObjectRequest;
+    };
 
     // TODO: the Cache-Control policy metadata is lost. try to set a global policy for the bucket in aws.
     await s3.copyObject(params).promise();
@@ -116,7 +113,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
 
       // create item
       const task = taskManager.createCreateTask(member, itemData, parentId);
-      const item = await runner.run([task], log) as Item<S3FileExtra>;
+      const item = await runner.runSingle(task, log);
 
       // add member and item info to S3 object metadata
       const metadata = { member: member.id, item: item.id };
@@ -148,16 +145,17 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
   fastify.get<{ Params: IdParam }>(
     '/:id/s3-metadata', { schema: getMetadataSchema },
     async ({ member, params: { id }, log }) => {
-      const task = taskManager.createGetTask(member, id);
-      const { extra } = await runner.run([task], log) as Item<S3FileExtra>;
+      const task = taskManager.createGetTask<S3FileExtra>(member, id);
+      const { extra } = await runner.runSingle(task, log);
       const { size, contenttype, key } = extra;
 
       if ((size === 0 || size) && contenttype) return extra;
 
       let itemData;
+      const params: S3.HeadObjectRequest = { Bucket: bucket, Key: key };
 
       try {
-        const { ContentLength, ContentType } = await s3.headObject({ Bucket: bucket, Key: key }).promise();
+        const { ContentLength, ContentType } = await s3.headObject(params).promise();
         itemData = { extra: { size: ContentLength, contenttype: ContentType } };
       } catch (error) {
         log.error(error, 'graasp-s3-file-item: failed to get s3 object metadata');
@@ -165,7 +163,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
       }
 
       const updateTask = taskManager.createUpdateTask(member, id, itemData);
-      const { extra: metadata } = await runner.run([updateTask], log) as Item<S3FileExtra>;
+      const { extra: metadata } = await runner.runSingle(updateTask, log);
 
       return metadata;
     }
