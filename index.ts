@@ -1,12 +1,11 @@
 import { FastifyPluginAsync } from 'fastify';
 import { Item, UnknownExtra } from 'graasp';
-
+import S3 from 'aws-sdk/clients/s3';
 import {
   upload as uploadSchema,
   getMetadata as getMetadataSchema
 } from './schemas/shared';
-
-import S3 from 'aws-sdk/clients/s3';
+import { NotS3FileItem } from './utils/errors';
 
 interface GraaspS3FileItemOptions {
   s3Region: string,
@@ -17,11 +16,13 @@ interface GraaspS3FileItemOptions {
   s3Expiration?: number
 }
 
-interface S3FileExtra extends UnknownExtra {
-  name: string,
-  key: string,
-  size?: number,
-  contenttype?: string
+interface S3FileItemExtra extends UnknownExtra {
+  s3FileItem: {
+    name: string,
+    key: string,
+    size?: number,
+    contenttype?: string
+  }
 }
 
 interface IdParam { id: string }
@@ -57,11 +58,13 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
 
   // register post delete handler to remove the s3 file object after item delete
   const deleteItemTaskName = taskManager.getDeleteTaskName();
-  runner.setTaskPostHookHandler<Item<S3FileExtra>>(deleteItemTaskName, (item, _actor, { log = defaultLogger }) => {
-    const { type: itemType, extra: { key } } = item;
-    if (itemType !== ITEM_TYPE) return;
+  runner.setTaskPostHookHandler<Item<S3FileItemExtra>>(deleteItemTaskName, (item, _actor, { log = defaultLogger }) => {
+    const { type: itemType, extra: { s3FileItem } } = item;
+    if (itemType !== ITEM_TYPE || !s3FileItem) return;
 
-    s3.deleteObject({ Bucket: bucket, Key: key }).promise()
+    const { key } = s3FileItem;
+    const params: S3.HeadObjectRequest = { Bucket: bucket, Key: key };
+    s3.deleteObject(params).promise()
       // using request's logger instance. can't use arrow fn because 'log.error' uses 'this'.
       .catch(function (error) {
         log.error(error, `graasp-s3-file-item: failed to delete s3 object \'${key}\'`);
@@ -70,15 +73,12 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
 
   // register pre copy handler to make a copy of the s3 file object before the copy is actually created
   const copyItemTaskName = taskManager.getCopyTaskName();
-  runner.setTaskPreHookHandler<Item<S3FileExtra>>(copyItemTaskName, async (item, actor) => {
-    const { id, type: itemType, extra } = item; // full copy with new `id`
-    if (!id || itemType !== ITEM_TYPE || !extra) return;
+  runner.setTaskPreHookHandler<Item<S3FileItemExtra>>(copyItemTaskName, async (item, actor) => {
+    const { id, type: itemType, extra: { s3FileItem } = {} } = item; // full copy with new `id`
+    if (!id || itemType !== ITEM_TYPE || !s3FileItem) return;
 
-    const { key, contenttype, name } = extra;
-    const metadata: S3.Metadata = {
-      member: actor.id,
-      item: id
-    };
+    const { key, contenttype, name } = s3FileItem;
+    const metadata: S3.Metadata = { member: actor.id, item: id };
     const newKey = `${randomHexOf4()}/${randomHexOf4()}/${randomHexOf4()}-${Date.now()}`;
 
     const params: S3.CopyObjectRequest = {
@@ -95,7 +95,7 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
     // TODO: the Cache-Control policy metadata is lost. try to set a global policy for the bucket in aws.
     await s3.copyObject(params).promise();
 
-    extra.key = newKey;
+    s3FileItem.key = newKey;
   });
 
   // trigger s3 file upload
@@ -105,10 +105,10 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
       const name = filename.substring(0, ORIGINAL_FILENAME_TRUNCATE_LIMIT);
       const key = `${randomHexOf4()}/${randomHexOf4()}/${randomHexOf4()}-${Date.now()}`;
 
-      const itemData: Partial<Item<S3FileExtra>> = {
+      const itemData: Partial<Item<S3FileItemExtra>> = {
         name,
         type: ITEM_TYPE,
-        extra: { name: filename, key }
+        extra: { s3FileItem: { name: filename, key } }
       };
 
       // create item
@@ -145,25 +145,30 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
   fastify.get<{ Params: IdParam }>(
     '/:id/s3-metadata', { schema: getMetadataSchema },
     async ({ member, params: { id }, log }) => {
-      const task = taskManager.createGetTask<S3FileExtra>(member, id);
-      const { extra } = await runner.runSingle(task, log);
-      const { size, contenttype, key } = extra;
+      const task = taskManager.createGetTask<S3FileItemExtra>(member, id);
+      const item = await runner.runSingle(task, log);
+      const { s3FileItem } = item.extra;
 
-      if ((size === 0 || size) && contenttype) return extra;
+      if (!s3FileItem) throw new NotS3FileItem(id);
 
-      let itemData;
+      const { size, contenttype, key } = s3FileItem;
+      if ((size === 0 || size) && contenttype) return s3FileItem;
+
+      let itemData: Partial<Item<S3FileItemExtra>>;
       const params: S3.HeadObjectRequest = { Bucket: bucket, Key: key };
 
       try {
-        const { ContentLength, ContentType } = await s3.headObject(params).promise();
-        itemData = { extra: { size: ContentLength, contenttype: ContentType } };
+        const { ContentLength: cL, ContentType: cT } = await s3.headObject(params).promise();
+        itemData = {
+          extra: { s3FileItem: Object.assign(s3FileItem, { size: cL, contenttype: cT }) }
+        };
       } catch (error) {
         log.error(error, 'graasp-s3-file-item: failed to get s3 object metadata');
         throw error;
       }
 
       const updateTask = taskManager.createUpdateTask(member, id, itemData);
-      const { extra: metadata } = await runner.runSingle(updateTask, log);
+      const { extra: { s3FileItem: metadata } } = await runner.runSingle(updateTask, log);
 
       return metadata;
     }
