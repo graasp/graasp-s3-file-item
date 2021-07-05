@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { Item, UnknownExtra } from 'graasp';
+import graaspFileUploadLimiter from 'graasp-file-upload-limiter'
 import S3 from 'aws-sdk/clients/s3';
 import {
   upload as uploadSchema,
@@ -69,6 +70,12 @@ const plugin: FastifyPluginAsync<GraaspS3FileItemOptions> = async (fastify, opti
       .catch(function (error) {
         log.error(error, `graasp-s3-file-item: failed to delete s3 object \'${key}\'`);
       });
+  });
+
+  // set up file upload limit
+  await fastify.register(graaspFileUploadLimiter, {
+    type: ITEM_TYPE,
+    sizePath: 's3File.size',
   });
 
   // register pre copy handler to make a copy of the s3 file object before the copy is actually created
