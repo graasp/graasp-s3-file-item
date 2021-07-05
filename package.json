@@ -21,7 +21,8 @@
   },
   "homepage": "https://github.com/graasp/graasp-s3-file-item#readme",
   "dependencies": {
-    "aws-sdk": "^2.793.0"
+    "aws-sdk": "^2.793.0",
+    "graasp-file-upload-limiter": "git://github.com/graasp/graasp-file-upload-limiter#3/catchSize"
   },
   "devDependencies": {
     "@types/eslint": "^7.2.5",
